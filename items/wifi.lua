@@ -174,6 +174,8 @@ wifi_net:subscribe({ "forced", "routine", "wifi_change", "system_woke" }, functi
 	update_connection_state()
 end)
 
+local last_net_label = nil
+
 wifi_net:subscribe("network_update", function(env)
 	if _G.SKETCHYBAR_SUSPENDED then
 		return
@@ -195,9 +197,11 @@ wifi_net:subscribe("network_update", function(env)
 	end
 	update_popup_rates()
 
-	wifi_net:set({
-		label = format_rate(current_down_mbps) .. "\xe2\x86\x93 " .. format_rate(current_up_mbps) .. "\xe2\x86\x91",
-	})
+	local label = format_rate(current_down_mbps) .. "\xe2\x86\x93 " .. format_rate(current_up_mbps) .. "\xe2\x86\x91"
+	if label ~= last_net_label then
+		last_net_label = label
+		wifi_net:set({ label = label })
+	end
 end)
 
 -- Hardcoded helper binary path

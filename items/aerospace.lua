@@ -122,6 +122,19 @@ local function ensure_focused(workspaces, ws_order, focused_ws)
 	end
 end
 
+-- Only send properties that changed since the last render. Every :set is a
+-- synchronous round-trip to the daemon, so skipping no-op updates matters.
+local last_sig = {}
+local function set_if_changed(item, sig, props)
+	if last_sig[item.name] == sig then
+		return
+	end
+	last_sig[item.name] = sig
+	item:set(props)
+end
+
+local HIDDEN = { drawing = false }
+
 -- Apply workspace data to pre-created sketchybar items
 local function render(workspaces, ws_order, focused_ws, focused_win_id)
 	for w = 1, MAX_WORKSPACES do
@@ -130,7 +143,7 @@ local function render(workspaces, ws_order, focused_ws, focused_win_id)
 
 		if ws_name then
 			local is_focused_ws = (ws_name == focused_ws)
-			ws_groups[w].pill:set({
+			set_if_changed(ws_groups[w].pill, ws_name .. (is_focused_ws and "|f" or "|"), {
 				drawing = true,
 				icon = {
 					string = ws_name,
@@ -148,7 +161,7 @@ local function render(workspaces, ws_order, focused_ws, focused_win_id)
 					local icon_str = app_icons[win.app] or app_icons["Default"] or ":default:"
 					local is_app_font = icon_str:match("^:.*:$")
 					local is_focused = (win.win_id ~= "" and win.win_id == focused_win_id)
-					ws_groups[w].icons[i]:set({
+					set_if_changed(ws_groups[w].icons[i], icon_str .. (is_focused and "|f" or "|"), {
 						drawing = true,
 						icon = {
 							string = icon_str,
@@ -161,29 +174,37 @@ local function render(workspaces, ws_order, focused_ws, focused_win_id)
 						},
 					})
 				else
-					ws_groups[w].icons[i]:set({ drawing = false })
+					set_if_changed(ws_groups[w].icons[i], "", HIDDEN)
 				end
 			end
 		else
-			ws_groups[w].pill:set({ drawing = false })
+			set_if_changed(ws_groups[w].pill, "", HIDDEN)
 			for i = 1, MAX_WINDOWS_PER_WS do
-				ws_groups[w].icons[i]:set({ drawing = false })
+				set_if_changed(ws_groups[w].icons[i], "", HIDDEN)
 			end
 		end
 	end
 end
 
--- Single combined shell command (1 process instead of 3 sequential ones)
+-- Single combined shell command. Usually 2 aerospace calls (~70ms each):
+-- the focused window also tells us the focused workspace; the extra
+-- list-workspaces call only runs when the focused workspace is empty.
+-- Each call is capped at 2s so a hung CLI can't stall updates, and gets
+-- stdin from /dev/null: the aerospace CLI reads stdin when it's not a TTY
+-- and would otherwise wait forever on an open pipe.
+local T = "/usr/bin/perl -e 'alarm 2; exec @ARGV' aerospace "
+local Q = " </dev/null 2>/dev/null"
+local WINDOWS_CMD = T .. "list-windows --all --format '%{workspace}|||%{app-name}|||%{window-id}'" .. Q
 local QUERY_CMD = "echo '---WINDOWS---'; "
-	.. "aerospace list-windows --all --format '%{workspace}|||%{app-name}|||%{window-id}' 2>/dev/null; "
+	.. WINDOWS_CMD .. "; "
+	.. "F=$(" .. T .. "list-windows --focused --format '%{window-id}|||%{workspace}'" .. Q .. "); "
+	.. "echo '---FOCUSED_WIN---'; echo \"$F\"; "
 	.. "echo '---FOCUSED_WS---'; "
-	.. "aerospace list-workspaces --focused 2>/dev/null; "
-	.. "echo '---FOCUSED_WIN---'; "
-	.. "aerospace list-windows --focused --format '%{window-id}' 2>/dev/null"
+	.. "[ -z \"$F\" ] && " .. T .. "list-workspaces --focused" .. Q .. "; true"
 
 -- Parse the combined output into its 3 sections
 local function parse_combined(raw)
-	local windows_block = ""
+	local lines = {}
 	local focused_ws = ""
 	local focused_win_id = ""
 
@@ -196,64 +217,141 @@ local function parse_combined(raw)
 		elseif line == "---FOCUSED_WIN---" then
 			section = "fwin"
 		elseif section == "w" then
-			windows_block = windows_block .. line .. "\n"
+			lines[#lines + 1] = line
 		elseif section == "fw" then
 			focused_ws = line:match("^%s*(.-)%s*$") or ""
 		elseif section == "fwin" then
-			focused_win_id = line:match("^%s*(.-)%s*$") or ""
+			local id, ws = line:match("^%s*(.-)|||(.-)%s*$")
+			if id then
+				focused_win_id = id
+				focused_ws = ws
+			end
 		end
 	end
 
-	return windows_block, focused_ws, focused_win_id
+	return table.concat(lines, "\n"), focused_ws, focused_win_id
 end
 
--- Synchronous update (used at startup)
-local function update_display_sync()
-	local p = io.popen(QUERY_CMD)
-	local raw = p and p:read("*a") or ""
-	if p then
-		p:close()
-	end
+-- Coalesced async update. Switching a window fires up to three events
+-- (front_app_switched, aerospace_focus_change, aerospace_workspace_change);
+-- they are merged into one query, and only one query runs at a time so
+-- out-of-order results can't render a stale state.
+local DEBOUNCE_S = 0.03
+local STUCK_S = 10.0
+local scheduled = false
+local in_flight = false
+local dirty = false
+local query_token = 0
+local last_windows_block = nil
+local last_workspaces = nil
+local last_ws_order = nil
 
-	local windows_block, focused_ws, focused_win_id = parse_combined(raw)
-	local workspaces, ws_order = parse_all_windows(windows_block)
-	ensure_focused(workspaces, ws_order, focused_ws)
-	render(workspaces, ws_order, focused_ws, focused_win_id)
-end
+local run_query
 
--- Async update (used in event callbacks — single exec, no nesting)
-local function update_display_async()
-	if _G.SKETCHYBAR_SUSPENDED then
+local function request_update()
+	if scheduled then
 		return
 	end
-
-	sbar.exec(QUERY_CMD, function(raw)
-		local output = tostring(raw or "")
-		local windows_block, focused_ws, focused_win_id = parse_combined(output)
-		local workspaces, ws_order = parse_all_windows(windows_block)
-		ensure_focused(workspaces, ws_order, focused_ws)
-		render(workspaces, ws_order, focused_ws, focused_win_id)
+	scheduled = true
+	sbar.delay(DEBOUNCE_S, function()
+		scheduled = false
+		run_query()
 	end)
 end
 
-update_display_sync()
+run_query = function()
+	if in_flight then
+		dirty = true
+		return
+	end
+	if _G.SKETCHYBAR_SUSPENDED then
+		-- Don't drop the update; retry once the bar resumes.
+		sbar.delay(0.5, request_update)
+		return
+	end
 
-ws_groups[1].pill:subscribe("aerospace_workspace_change", function(_)
-	update_display_async()
+	in_flight = true
+	dirty = false
+	query_token = query_token + 1
+	local token = query_token
+
+	-- Safety net: never let a lost callback block updates forever.
+	sbar.delay(STUCK_S, function()
+		if in_flight and token == query_token then
+			in_flight = false
+			request_update()
+		end
+	end)
+
+	sbar.exec(QUERY_CMD, function(raw)
+		if token ~= query_token then
+			return
+		end
+		in_flight = false
+		local windows_block, focused_ws, focused_win_id = parse_combined(tostring(raw or ""))
+		last_windows_block = windows_block
+		local workspaces, ws_order = parse_all_windows(windows_block)
+		-- Cache copies: ensure_focused mutates the tables in place.
+		last_workspaces = {}
+		for name, wins in pairs(workspaces) do
+			last_workspaces[name] = wins
+		end
+		last_ws_order = { table.unpack(ws_order) }
+		ensure_focused(workspaces, ws_order, focused_ws)
+		render(workspaces, ws_order, focused_ws, focused_win_id)
+		if dirty then
+			request_update()
+		end
+	end)
+end
+
+request_update()
+
+-- Optimistic render: the workspace-change event already names the new
+-- workspace, so move the highlight right away from cached data; the real
+-- query follows ~130ms later and corrects window details.
+local function render_focused_ws(ws)
+	if not ws or ws == "" or not last_workspaces then
+		return
+	end
+	local workspaces = {}
+	for name, wins in pairs(last_workspaces) do
+		workspaces[name] = wins
+	end
+	local ws_order = { table.unpack(last_ws_order) }
+	ensure_focused(workspaces, ws_order, ws)
+	render(workspaces, ws_order, ws, nil)
+end
+
+ws_groups[1].pill:subscribe("aerospace_workspace_change", function(env)
+	render_focused_ws(env.FOCUSED_WORKSPACE)
+	request_update()
 end)
 
-ws_groups[1].pill:subscribe("front_app_switched", function(_)
-	update_display_async()
+ws_groups[1].pill:subscribe({ "aerospace_focus_change", "front_app_switched" }, function(_)
+	request_update()
 end)
 
-ws_groups[1].pill:subscribe("aerospace_focus_change", function(_)
-	update_display_async()
-end)
-
+-- Fallback poll for changes AeroSpace has no callback for (a window opened
+-- or closed in the background, an app quitting). Bindings and focus changes
+-- trigger events, so this only runs the cheap window listing and asks for a
+-- full update when the window set actually changed.
+local POLL_S = 2
 local poller = sbar.add("item", "aerospace.poller", {
 	drawing = false,
-	update_freq = 0,
+	update_freq = POLL_S,
 })
 poller:subscribe("routine", function(_)
-	update_display_async()
+	if in_flight or scheduled or _G.SKETCHYBAR_SUSPENDED then
+		return
+	end
+	sbar.exec(WINDOWS_CMD, function(raw)
+		local lines = {}
+		for line in tostring(raw or ""):gmatch("[^\r\n]+") do
+			lines[#lines + 1] = line
+		end
+		if table.concat(lines, "\n") ~= last_windows_block then
+			request_update()
+		end
+	end)
 end)

@@ -178,12 +178,21 @@ cpu_label:subscribe("mouse.clicked", function(env)
 	end
 end)
 
+-- Last sent height/color per core: most ticks change only a few bars, and
+-- each :set is a synchronous round-trip to the daemon.
+local core_last_h = {}
+local core_last_color = {}
+
 local function update_core(idx, load)
 	if not core_items[idx] then return end
 	local h = math.max(3, math.floor(load / 100 * max_bar_height + 0.5))
+	local color = (idx >= pcores) and colors.blue or color_for_load(load)
+	if core_last_h[idx] == h and core_last_color[idx] == color then return end
+	core_last_h[idx] = h
+	core_last_color[idx] = color
 	core_items[idx]:set({
 		background = {
-			color = (idx >= pcores) and colors.blue or color_for_load(load),
+			color = color,
 			height = h,
 			y_offset = -(max_bar_height - h) / 2,
 		},
@@ -193,6 +202,13 @@ end
 --------------------------------------------------------------------------------
 -- EVENT: system_stats_update
 --------------------------------------------------------------------------------
+local last_label = {}
+local function set_label(item, key, text)
+	if last_label[key] == text then return end
+	last_label[key] = text
+	item:set({ label = text })
+end
+
 cpu_info:subscribe("system_stats_update", function(env)
 	if _G.SKETCHYBAR_SUSPENDED then
 		return
@@ -229,10 +245,12 @@ cpu_info:subscribe("system_stats_update", function(env)
 	-- CPU: avg temp + avg load (1s averages)
 	local cpu_avg = tonumber(env.cpu_avg)
 	local cpu_temp_avg = tonumber(env.cpu_temp_avg)
-	cpu_info:set({
-		icon = { string = (cpu_temp_avg and cpu_temp_avg >= 0) and string.format("%d\xc2\xb0", cpu_temp_avg) or "" },
-		label = { string = cpu_avg and cpu_avg >= 0 and string.format("%d%%", cpu_avg) or "--" },
-	})
+	local cpu_icon = (cpu_temp_avg and cpu_temp_avg >= 0) and string.format("%d\xc2\xb0", cpu_temp_avg) or ""
+	local cpu_lbl = cpu_avg and cpu_avg >= 0 and string.format("%d%%", cpu_avg) or "--"
+	if last_label.cpu ~= cpu_icon .. "|" .. cpu_lbl then
+		last_label.cpu = cpu_icon .. "|" .. cpu_lbl
+		cpu_info:set({ icon = { string = cpu_icon }, label = { string = cpu_lbl } })
+	end
 
 	-- GPU label (1s averages)
 	local gpu_avg = tonumber(env.gpu_avg)
@@ -242,9 +260,9 @@ cpu_info:subscribe("system_stats_update", function(env)
 		if gpu_temp_avg and gpu_temp_avg >= 0 then
 			lbl = lbl .. string.format(" %d\xc2\xb0", gpu_temp_avg)
 		end
-		gpu:set({ label = lbl })
+		set_label(gpu, "gpu", lbl)
 	else
-		gpu:set({ label = "--" })
+		set_label(gpu, "gpu", "--")
 	end
 
 	-- MEM label
@@ -255,9 +273,9 @@ cpu_info:subscribe("system_stats_update", function(env)
 		if mem_used_gb and mem_total_gb then
 			lbl = lbl .. string.format(" %.0f/%.0fG", mem_used_gb, mem_total_gb)
 		end
-		mem:set({ label = lbl })
+		set_label(mem, "mem", lbl)
 	else
-		mem:set({ label = "--" })
+		set_label(mem, "mem", "--")
 	end
 end)
 
