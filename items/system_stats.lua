@@ -6,7 +6,7 @@ local settings = require("settings")
 -- All commands below are hardcoded strings with no user input.
 local system_stats_cmd = "killall system_stats >/dev/null 2>&1; "
 	.. os.getenv("CONFIG_DIR")
-	.. "/helpers/system_stats/bin/system_stats system_stats_update 0.5"
+	.. "/helpers/system_stats/bin/system_stats system_stats_update 1"
 
 sbar.exec(system_stats_cmd)
 

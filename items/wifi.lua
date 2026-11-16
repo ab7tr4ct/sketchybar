@@ -5,7 +5,7 @@ local settings = require("settings")
 -- NOTE: sbar.exec is the SketchyBar Lua API, NOT Node.js child_process.
 -- All commands below are hardcoded strings with no user input.
 local network_load_cmd =
-	"killall network_load >/dev/null 2>&1; $CONFIG_DIR/helpers/network_load/bin/network_load auto network_update 0.5"
+	"killall network_load >/dev/null 2>&1; $CONFIG_DIR/helpers/network_load/bin/network_load auto network_update 1"
 sbar.exec(network_load_cmd)
 
 local wifi_interface = os.getenv("WIFI_INTERFACE") or "en0"
