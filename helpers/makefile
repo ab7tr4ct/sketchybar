@@ -1,4 +1,5 @@
 all:
+	(cd aerospace_events && $(MAKE)) >/dev/null
 	(cd battery_info && $(MAKE)) >/dev/null
 	(cd network_load && $(MAKE)) >/dev/null
 	(cd network_info && $(MAKE)) >/dev/null

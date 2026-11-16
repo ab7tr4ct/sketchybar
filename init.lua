@@ -11,6 +11,7 @@ end
 local function helpers_ready()
   local root = os.getenv("HOME") .. "/.config/sketchybar/helpers"
   local required = {
+    root .. "/aerospace_events/bin/aerospace_events",
     root .. "/battery_info/bin/battery_info",
     root .. "/network_load/bin/network_load",
     root .. "/network_info/bin/SketchyBarNetworkInfoHelper.app/Contents/MacOS/SketchyBarNetworkInfoHelper",

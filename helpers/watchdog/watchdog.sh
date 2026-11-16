@@ -61,6 +61,6 @@ kill -9 "$pid" $lua_pids 2>/dev/null
 # Hung `sketchybar --trigger/--set/...` clients waiting for a reply.
 ps -axo pid=,args= | awk '$2 ~ /sketchybar$/ && $3 ~ /^--/ { print $1 }' | xargs kill -9 2>/dev/null
 # Helpers block in mach_msg too; the config restarts them on load.
-killall -9 system_stats network_load 2>/dev/null
+killall -9 system_stats network_load aerospace_events 2>/dev/null
 
 echo "$(date) watchdog: restarted frozen sketchybar, report: $report" >> "$LOG_DIR/watchdog.log"
