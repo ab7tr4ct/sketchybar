@@ -1,6 +1,6 @@
 {
+  enabled = false,
   history = {
-    84,
     84,
     84,
     84,
@@ -144,7 +144,7 @@
     62,
     74,
     92,
+    66,
   },
-  enabled = false,
   target = 54,
 }
